@@ -21,10 +21,19 @@
 // https://github.com/rarranzb/ADAU1701-TCPi-ESP32
 // License: MIT
 // =============================================================
-
+#if defined(ESP32)
 #include <WiFi.h>
-#include <Wire.h>
 #include <WebServer.h>
+#include <Preferences.h>
+
+#elif defined(ARDUINO_ARCH_ESP8266)
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#define WebServer ESP8266WebServer
+
+#endif
+
+#include <Wire.h>
 #include <Preferences.h>
 
 // ── Factory defaults ──────────────────────────────────────────
@@ -32,16 +41,31 @@
 #define FACTORY_PASSWORD  ""
 
 // ── AP mode ───────────────────────────────────────────────────
-#define AP_SSID           "ADAU1701-ESP32"
+#define AP_SSID           "ADAU1701-ESP"
 #define AP_PASSWORD       "adau1701"
 
 // ── Default pins ──────────────────────────────────────────────
+#if defined(ESP32)
 #define DEFAULT_SCL       17
 #define DEFAULT_SDA       16
 #define DEFAULT_RESET     21
 #define DEFAULT_SELFBOOT  19
 #define DEFAULT_LED        2
 #define BOOT_BUTTON_PIN    0
+
+#elif defined(ARDUINO_ARCH_ESP8266)
+
+// Wemos d1 mini pinout ()
+#define DEFAULT_SCL       5  // D1
+#define DEFAULT_SDA       4  // D2
+#define DEFAULT_RESET     0  // D3
+#define DEFAULT_SELFBOOT  15  // D8
+#define DEFAULT_LED       LED_BUILTIN  // D4 
+#define BOOT_BUTTON_PIN   13 // D7
+
+#endif
+
+
 
 // ── DSP ───────────────────────────────────────────────────────
 #define DSP_I2C_ADDR      0x34
@@ -63,7 +87,17 @@
 #define CTRL_WRITE        0x09
 #define CTRL_READ_REQ     0x0A
 #define CTRL_READ_RESP    0x0B
+
+#if defined(ESP32)
 #define BUFFER_SIZE       (1024 * 16)
+
+#elif defined(ARDUINO_ARCH_ESP8266)
+#define BUFFER_SIZE       (1024 * 4)
+
+#else
+#define BUFFER_SIZE       (1024 * 4)
+#endif
+
 
 // ── EEPROM selfboot capture ───────────────────────────────────
 // Selfboot format per record: [len(2)] [addr(2)] [data(len)]
@@ -119,6 +153,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n[BOOT] ADAU1701-TCPi-ESP32 v1.0");
+  delay(500);
 
   loadConfig();
   initHardware();
@@ -149,6 +184,7 @@ void loop() {
   httpServer.handleClient();
   if (apMode) return;
 
+  #if defined(ESP32)
   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
     delay(50);
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
@@ -158,6 +194,7 @@ void loop() {
       while (digitalRead(BOOT_BUTTON_PIN) == LOW) delay(10);
     }
   }
+  #endif
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WiFi] Lost -> reconnecting...");
@@ -179,7 +216,7 @@ void loop() {
     }
   }
 
-  if (client && client.connected() && client.available()) {
+  if (client && client.connected() && (client.available() > 0)) {
     int n = client.readBytes(rxBuffer + rxLen, BUFFER_SIZE - rxLen);
     rxLen += n;
     int consumed = processBuffer(rxBuffer, rxLen);
@@ -231,9 +268,14 @@ void initHardware() {
   pinMode(pinSELFBOOT,     OUTPUT); digitalWrite(pinSELFBOOT, LOW);
   pinMode(pinRESET,        OUTPUT); digitalWrite(pinRESET,    HIGH);
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  #if defined(ESP32)
   Wire.setBufferSize(2048);
   Wire.begin(pinSDA, pinSCL, 400000);
   Wire.setTimeOut(50);
+  #else // (ESP8266)
+  Wire.begin(pinSDA, pinSCL, 400000);
+  Wire.setTimeout(50);
+  #endif
   Serial.printf("[I2C] SCL=%d SDA=%d 400kHz\n", pinSCL, pinSDA);
 }
 
@@ -737,10 +779,16 @@ void directWrite(uint8_t i2cAddr, uint16_t regAddr, uint8_t* data, uint16_t data
     uint8_t err = Wire.endTransmission(true);
     if (err != 0) {
       Serial.printf("[I2C] ERR 0x%04X len=%d err=%d\n", addr, bytes, err);
+      #if defined(ESP32)
       Wire.end(); delay(5);
       Wire.setBufferSize(2048);
       Wire.begin(pinSDA, pinSCL, 400000);
       Wire.setTimeOut(50);
+      #else // (ESP8266)
+      delay(10);
+      Wire.begin(pinSDA, pinSCL, 400000);
+      Wire.setTimeout(50);
+      #endif
     }
     offset += bytes;
   }
