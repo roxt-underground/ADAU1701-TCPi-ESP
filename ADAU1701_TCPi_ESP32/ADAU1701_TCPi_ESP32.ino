@@ -5,12 +5,15 @@
 // Features:
 //   - Full SigmaStudio TCPi protocol over WiFi (port 8086)
 //   - Hardware safeload: glitch-free real-time parameter updates
+//   - Adapted for ESP8266 platform
 //   - Chunked I2C writes: prevents silent data corruption
 //   - EEPROM selfboot: save program from web interface
 //   - Web portal: WiFi + GPIO pin configuration
 //   - AP mode for first-time setup
+//   - Write protect pin support on "green" boards
 //
 // https://github.com/rarranzb/ADAU1701-TCPi-ESP32
+// https://github.com/roxt-underground/ADAU1701-TCPi-ESP
 // License: MIT
 //   - Captures all sl=0 writes during Download
 //   - http://IP/ -> button "Save to EEPROM"
@@ -59,10 +62,10 @@
 #define DEFAULT_SCL       5  // D1
 #define DEFAULT_SDA       4  // D2
 #define DEFAULT_RESET     0  // D3
-#define DEFAULT_SELFBOOT  15  // D8
+#define DEFAULT_SELFBOOT  12  // D6
 #define DEFAULT_LED       LED_BUILTIN  // D4 
-#define BOOT_BUTTON_PIN   13 // D7
-
+// #define BOOT_BUTTON_PIN   12 // D6 
+#define WRITE_PROTECT_PIN 13  // D7
 #endif
 
 
@@ -126,6 +129,14 @@ int      rxLen           = 0;
 String   savedSSID, savedPassword;
 int      pinSCL, pinSDA, pinRESET, pinSELFBOOT, pinLED;
 
+#ifdef WRITE_PROTECT_PIN
+#define write_protect_high digitalWrite(WRITE_PROTECT_PIN, HIGH)
+#define write_protect_low  digitalWrite(WRITE_PROTECT_PIN, LOW)
+#else 
+#define write_protect_high __asm__ __volatile__ ("nop\n\t")
+#define write_protect_low  __asm__ __volatile__ ("nop\n\t")
+#endif
+
 // ── Prototypes ────────────────────────────────────────────────
 void loadConfig();
 void saveWiFi(const String& ssid, const String& pass);
@@ -140,6 +151,7 @@ void resetDSP();
 void captureWrite(uint16_t address, uint8_t* data, uint16_t dataLen);
 bool writeEEPROM();
 bool eepromWritePage(uint16_t memAddr, uint8_t* data, int len);
+void resetEEPROMCapture();
 int  processBuffer(uint8_t* buf, int len);
 void handleWrite(uint8_t chipAddr, uint16_t address, uint8_t* data, uint16_t dataLen, uint8_t safeload);
 void handleRead(uint8_t chipAddr, uint16_t address, uint16_t nBytes);
@@ -266,8 +278,14 @@ void savePins(int scl, int sda, int rst, int sb, int led) {
 void initHardware() {
   pinMode(pinLED,          OUTPUT); digitalWrite(pinLED,      LOW);
   pinMode(pinSELFBOOT,     OUTPUT); digitalWrite(pinSELFBOOT, LOW);
-  pinMode(pinRESET,        OUTPUT); digitalWrite(pinRESET,    HIGH);
+  pinMode(pinRESET,        OUTPUT); digitalWrite(pinRESET,  HIGH);
+  #ifdef BOOT_BUTTON_PIN
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  #endif
+  #ifdef WRITE_PROTECT_PIN
+  pinMode(WRITE_PROTECT_PIN,       OUTPUT);
+  write_protect_high;
+  #endif
   #if defined(ESP32)
   Wire.setBufferSize(2048);
   Wire.begin(pinSDA, pinSCL, 400000);
@@ -365,6 +383,9 @@ bool writeEEPROM() {
   captureBuffer[captureLen++] = 0x00;
   captureBuffer[captureLen++] = 0x00;
 
+  write_protect_low; delay(100);
+  digitalWrite(pinRESET,  LOW); delay(10);
+
   Serial.printf("[EEPROM] Writing %d bytes to 0x%02X...\n", captureLen, EEPROM_I2C_ADDR);
 
   int offset = 0;
@@ -375,6 +396,9 @@ bool writeEEPROM() {
 
     if (!eepromWritePage(offset, captureBuffer + offset, bytes)) {
       Serial.printf("[EEPROM] Write failed at offset %d\n", offset);
+
+      write_protect_high; delay(10);
+      digitalWrite(pinRESET,  HIGH); delay(10);
       return false;
     }
     offset += bytes;
@@ -385,6 +409,8 @@ bool writeEEPROM() {
   }
 
   Serial.println("[EEPROM] Done!");
+  write_protect_high; delay(100);
+  digitalWrite(pinRESET,  HIGH); delay(100);
   return true;
 }
 
@@ -481,8 +507,11 @@ void setupHTTP() {
     body += "<form action='/reset_dsp' method='POST'>"
             "<button class='btn btn-gray'>Reset DSP</button></form>";
 
-    // ── Save to EEPROM ─────────────────────────────────────
     if (captureReady) {
+    // ── Capture Reset ──────────────────────────────────────
+      body += "<form action='/reset_capture' method='POST'>"
+              "<button class='btn btn-gray'>Reset captured program</button></form>";
+    // ── Save to EEPROM ─────────────────────────────────────
       body += "<form action='/save_eeprom' method='POST'>"
               "<button class='btn btn-green'>&#x1F4BE; Save to EEPROM (selfboot)</button></form>"
               "<small style='display:block;margin-top:6px'>"
@@ -653,6 +682,13 @@ void setupHTTP() {
       ",\"ip\":\""        + ip + "\"}");
   });
 
+  httpServer.on("/reset_capture", HTTP_POST, []() {
+    httpServer.send(200, "text/html",
+      htmlHead("DSP Reset")+"<div class='ok'> Captured program reseted...</div>"
+      "<script>setTimeout(()=>location.href='/',3000)</script></body></html>");
+    resetEEPROMCapture();
+  });
+  
   httpServer.begin();
 }
 
@@ -800,6 +836,7 @@ void directWrite(uint8_t i2cAddr, uint16_t regAddr, uint8_t* data, uint16_t data
 void handleRead(uint8_t chipAddr, uint16_t address, uint16_t nBytes) {
   uint8_t i2cAddr = (chipAddr==0x01) ? DSP_I2C_ADDR :
                     (chipAddr==0x02) ? EEPROM_I2C_ADDR : chipAddr;
+  Serial.printf("[R] 0x%04X\t0x04X\t%d\n", i2cAddr, address, nBytes);
   Wire.beginTransmission(i2cAddr);
   Wire.write((address>>8)&0xFF); Wire.write(address&0xFF);
   Wire.endTransmission(false);
@@ -840,4 +877,11 @@ void blinkLED(int n) {
     digitalWrite(pinLED,LOW);  delay(100);
   }
   if (wasOn || (!apMode && client && client.connected())) digitalWrite(pinLED,HIGH);
+}
+
+void resetEEPROMCapture() {
+  captureReady  = false;   // true after DSPRUN=1 seen
+  for (int _i; _i < (captureLen +1); _i++) captureBuffer[_i] = 0;
+  captureLen    = 0;
+  Serial.println("[DSP] Capture reset!");
 }
