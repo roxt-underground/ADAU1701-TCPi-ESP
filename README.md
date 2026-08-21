@@ -5,6 +5,7 @@ Replaces ICP1 / ICP3 / ICP5 USB dongles. No pops or clicks thanks to hardware sa
 
 ![Hardware](docs/hardware.jpg)
 <!-- Photo: ESP32 connected to JAB4/ADAU1701 board. Save as docs/hardware.jpg -->
+![ESP8266](docs/esp8266_wemos_d1_mini.png)
 
 ---
 
@@ -42,12 +43,24 @@ All settings (WiFi credentials, GPIO pins) are configured from the web interface
 ## Wiring
 
 ```
-ADAU1701 / JAB4 (J4)     ESP32
+ADAU1701 / JAB4 (J4)      ESP32
 ────────────────────      ──────────
 SCL  ─────────────────→   GPIO 17
 SDA  ─────────────────→   GPIO 16
 RESET ────────────────→   GPIO 21
 SELFBOOT ─────────────→   GPIO 19
+3.3V ─────────────────→   3.3V
+GND  ─────────────────→   GND
+```
+
+```
+ADAU1701 / JAB4 (J4)      ESP8266
+────────────────────      ──────────
+SCL  ─────────────────→   GPIO 5 (D1)
+SDA  ─────────────────→   GPIO 4 (D2)
+RESET ────────────────→   GPIO 0 (D3)
+SELFBOOT ─────────────→   GPIO 12 (D6)
+WRITE PROTECT ────────→   GPIO 13 (D7) ───→ 10 kOm ──→ 3.3V
 3.3V ─────────────────→   3.3V
 GND  ─────────────────→   GND
 ```
@@ -60,7 +73,7 @@ Pins are reconfigurable from `http://ESP32-IP/config`.
 
 - ✅ Full SigmaStudio TCPi protocol over WiFi (TCP port 8086)
 - ✅ **Hardware safeload** — no pops or clicks when changing parameters in real time
-- ✅ **Save to EEPROM** from the web interface (selfboot)
+- ✅ **Save to EEPROM** from the web interface (selfboot). Add support WP pin.
 - ✅ Web interface for WiFi and GPIO configuration
 - ✅ Shows assigned IP address before rebooting after WiFi setup
 - ✅ AP mode for first-time setup from any phone or PC
