@@ -124,6 +124,7 @@ WiFiClient   client;
 WebServer    httpServer(80);
 
 bool     apMode          = false;
+bool     tcpListening    = false;
 unsigned long  apStartedAt   = 0;
 bool     dspRunning      = false;
 bool     webUIRunning    = false;
@@ -185,9 +186,10 @@ void safeloadChunk(uint16_t address, uint8_t* data, int words);
 void directWrite(uint8_t i2cAddr, uint16_t regAddr, uint8_t* data, uint16_t dataLen);
     // ── Preset area ───────────────────────────────────────────
 presetMap getPreset(String presetName);
-void writePreset(String presetName, presetMap * presetData);
-bool validatePresetName(String presetNmae);
-  
+void writePreset(const String & presetName, presetMap * presetData);
+void applyPresetI2C(presetMap & presetData);
+bool validatePresetName(const String& presetNmae);
+
 
 // =============================================================
 // SETUP
@@ -197,6 +199,10 @@ void setup() {
   delay(500);
   Serial.println("\n[BOOT] ADAU1701-TCPi-ESP32 v1.0");
   delay(500);
+
+  // #if defined(ARDUINO_ARCH_ESP8266)
+  // system_update_cpu_freq(160);
+  // #endif
 
   loadConfig();
   initHardware();
@@ -211,6 +217,7 @@ void setup() {
   if (!apMode) {
     tcpServer = new WiFiServer(TCP_PORT);
     tcpServer->begin();
+    tcpListening = true;
   }
 
   blinkLED(apMode ? 10 : 2);
@@ -223,18 +230,24 @@ void setup() {
 // =============================================================
 // LOOP
 // =============================================================
+unsigned long lastHeapCheck = 0;
 void loop() {
   httpServer.handleClient();
+  if (millis() - lastHeapCheck > 1000) {
+        lastHeapCheck = millis();
+        Serial.print("Current Free Heap: ");
+        Serial.println(ESP.getFreeHeap());
+    }
   if (apMode) {
-    if (WiFi.softAPgetStationNum() > 0) {
-      Serial.println("[AP] Found connected clients. Waiting Wi-Fi configuration...");
-      delay(1000);
-      return;
-    }
-    if ((millis() - apStartedAt) > AP_WAIT_TIMEOUT) {
-      unloadHTTP();
-      stopAP();
-    }
+    // if (WiFi.softAPgetStationNum() > 0) {
+    //   Serial.println("[AP] Found connected clients. Waiting Wi-Fi configuration...");
+    //   delay(1000);
+    //   return;
+    // }
+    // if ((millis() - apStartedAt) > AP_WAIT_TIMEOUT) {
+    //   unloadHTTP();
+    //   stopAP();
+    // }
     return;
   }
 
@@ -263,6 +276,7 @@ void loop() {
     }
   }
 
+  if (!tcpListening) return;
   if (!client || !client.connected()) {
     digitalWrite(pinLED, LOW);
     client = tcpServer->available();
@@ -490,61 +504,81 @@ bool eepromWritePage(uint16_t memAddr, uint8_t* data, int len) {
 // =============================================================
 // WEB INTERFACE
 // =============================================================
+
+#define _STYLE "<style>" \
+               "*{box-sizing:border-box}" \
+               "body{font-family:sans-serif;max-width:480px;margin:30px auto;padding:0 16px;color:#222}" \
+               "h2{margin-bottom:4px}" \
+               "h3{margin:24px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}" \
+               ".nav{margin-bottom:20px}" \
+               ".nav a{margin-right:14px;color:#0078d4;text-decoration:none;font-size:14px}" \
+               ".nav a:hover{text-decoration:underline}" \
+               ".card{background:#f7f7f7;border:1px solid #e0e0e0;border-radius:6px;" \
+               "      padding:14px;margin-bottom:16px;font-size:14px}" \
+               ".card b{display:inline-block;width:110px;color:#555}" \
+               "label{display:block;font-size:13px;color:#555;margin-top:10px}" \
+               "input[type=text],input[type=password],input[type=number]{" \
+               "  width:100%;padding:8px 10px;margin-top:4px;border:1px solid #ccc;" \
+               "  border-radius:4px;font-size:15px}" \
+               ".row{display:flex;gap:12px}.row>div{flex:1}" \
+               ".btn{display:block;width:100%;padding:10px;margin-top:12px;border:none;" \
+               "  border-radius:4px;font-size:15px;cursor:pointer;color:#fff}" \
+               ".btn-blue{background:#0078d4}.btn-blue:hover{background:#005fa3}" \
+               ".btn-green{background:#28a745}.btn-green:hover{background:#1e7e34}" \
+               ".btn-red{background:#dc3545}.btn-red:hover{background:#a71d2a}" \
+               ".btn-gray{background:#6c757d}.btn-gray:hover{background:#545b62}" \
+               ".ok{background:#d4edda;border:1px solid #c3e6cb;border-radius:4px;" \
+               "  padding:10px;color:#155724;margin-top:12px}" \
+               ".warn{background:#fff3cd;border:1px solid #ffc107;border-radius:4px;" \
+               "  padding:10px;color:#856404;margin-top:12px}" \
+               ".err{background:#f8d7da;border:1px solid #f5c6cb;border-radius:4px;" \
+               "  padding:10px;color:#721c24;margin-top:12px}" \
+               "small{color:#888;font-size:12px}" \
+               "</style>"
+
 String hexString(uint16_t);
 
 String htmlHead(const String& title) {
   return R"(<!DOCTYPE html><html><head>
 <meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>)" + title + R"(</title>
-<style>
-  *{box-sizing:border-box}
-  body{font-family:sans-serif;max-width:480px;margin:30px auto;padding:0 16px;color:#222}
-  h2{margin-bottom:4px}
-  h3{margin:24px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
-  nav{margin-bottom:20px}
-  nav a{margin-right:14px;color:#0078d4;text-decoration:none;font-size:14px}
-  nav a:hover{text-decoration:underline}
-  .card{background:#f7f7f7;border:1px solid #e0e0e0;border-radius:6px;
-        padding:14px;margin-bottom:16px;font-size:14px}
-  .card b{display:inline-block;width:110px;color:#555}
-  label{display:block;font-size:13px;color:#555;margin-top:10px}
-  input[type=text],input[type=password],input[type=number]{
-    width:100%;padding:8px 10px;margin-top:4px;border:1px solid #ccc;
-    border-radius:4px;font-size:15px}
-  .row{display:flex;gap:12px}.row>div{flex:1}
-  .btn{display:block;width:100%;padding:10px;margin-top:12px;border:none;
-    border-radius:4px;font-size:15px;cursor:pointer;color:#fff}
-  .btn-blue{background:#0078d4}.btn-blue:hover{background:#005fa3}
-  .btn-green{background:#28a745}.btn-green:hover{background:#1e7e34}
-  .btn-red{background:#dc3545}.btn-red:hover{background:#a71d2a}
-  .btn-gray{background:#6c757d}.btn-gray:hover{background:#545b62}
-  .ok{background:#d4edda;border:1px solid #c3e6cb;border-radius:4px;
-    padding:10px;color:#155724;margin-top:12px}
-  .warn{background:#fff3cd;border:1px solid #ffc107;border-radius:4px;
-    padding:10px;color:#856404;margin-top:12px}
-  .err{background:#f8d7da;border:1px solid #f5c6cb;border-radius:4px;
-    padding:10px;color:#721c24;margin-top:12px}
-  small{color:#888;font-size:12px}
-</style></head><body>
-<h2>ADAU1701-TCPi-ESP32</h2>
-<nav><a href='/'>Status</a><a href='/config'>Configuration</a><a href='/presets'>Presets</a></nav>
-)";
+<title>)" + title + "</title>" + _STYLE + "</head><body><h2>ADAU1701-TCPi-ESP32</h2><nav class=nav><a href='/'>Status</a><a href='/config'>Configuration</a><a href='/presets'>Presets</a></nav>";
 }
 
-String messagePage(String title, String msgKlass, String message, String pageDelay) {
+void sendHead(const String& title) {
+  httpServer.sendContent(R"(<!DOCTYPE html><html><head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>)");
+  yield();
+  httpServer.sendContent(title + "</title>");
+  yield();
+  httpServer.sendContent(_STYLE);
+  yield();
+  httpServer.sendContent("</head><body><h2>ADAU1701-TCPi-ESP32</h2><nav class=nav><a href='/'>Status</a><a href='/config'>Configuration</a><a href='/presets'>Presets</a></nav>");
+  yield();
+}
+
+
+void messagePage(const String& title, const String msgKlass, const String message, const String pageDelay) {
   httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
   httpServer.send(200, "text/html", "");
-  httpServer.sendContent(htmlHead(title));
+  sendHead(title);
+  yield();
   httpServer.sendContent("<div class='"+ msgKlass +"'>"+ message +"</div>"
                          "<script>setTimeout(()=>location.href='/', "+ pageDelay + " )</script>"
                          "</body></html>");
   httpServer.sendContent("");
-  return "";
 }
 
+
+#define _ROW_SCRIPT  "<script>function addPresetRow() {" \
+                     "const $ = id => document.getElementById(id); let len = +$('presetLen').value;" \
+                     "$('presetInputs').insertAdjacentHTML('beforeend',`<div class='row'><input type='text' name='address${len}'><input type='text' name='value${len}'></div>`);" \
+                     "$('presetLen').value = ++len;}</script>"
 String readPresetToHtml(String presetName) {
   String body = "", presetRow;
+
   presetMap preset = getPreset(presetName);
 
   body += "<div id='presetInputs'>\n";
@@ -559,14 +593,14 @@ String readPresetToHtml(String presetName) {
             "<input type='text' name='address" + String(i) + "' value='" + hexString(element.first) + "'/>\n"
             "<input type='text' name='value" + String(i) +   "' value='" + presetRow + "'/>\n</div>\n";
     i++;
+    presetRow.clear();
+    yield();
   }
   body += "</div>\n"
           "<input id='presetLen' value='" + String(i)+ "' type='number' name='len' hidden='true' />\n"
-          "<script>function addPresetRow() {"
-          "        const $ = id => document.getElementById(id); let len = +$('presetLen').value;"
-          "        $('presetInputs').insertAdjacentHTML('beforeend',`<div class='row'><input type='text' name='address${len}'><input type='text' name='value${len}'></div>`);"
-          "        $('presetLen').value = ++len;}</script>"
+          + _ROW_SCRIPT +
           "<input class='btn btn-green' onClick='addPresetRow()' type=button value='+'/>\n";
+  preset.clear();
   return body;
 }
 
@@ -579,7 +613,7 @@ void setupHTTP() {
     String body = "";
     httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
     httpServer.send(200, "text/html", "");
-    httpServer.sendContent(htmlHead("ADAU1701-TCPi-ESP32"));
+    sendHead("ADAU1701-TCPi-ESP32");
 
     body += "<div class='card'>";
     body += "<div><b>IP:</b>" + ip + "</div>";
@@ -599,7 +633,7 @@ void setupHTTP() {
     }
     body += "</div>";
     httpServer.sendContent(body);
-    body = "";
+    body.clear();
 
     if (apMode) {
       body += "<div class='warn'>Connect to <b>" + String(AP_SSID) +
@@ -629,6 +663,7 @@ void setupHTTP() {
     body += "</body></html>";
     httpServer.sendContent(body);
     httpServer.sendContent("");
+    body.clear();
   });
 
   // ── Save to EEPROM ─────────────────────────────────────────
@@ -672,57 +707,68 @@ void setupHTTP() {
     }
     body += "<a href='/'>Back</a></body></html>";
     httpServer.send(200, "text/html", body);
+    body.clear();
   });
 
   // ── Config page ─────────────────────────────────────────────
   httpServer.on("/config", []() {
-    String body = "";
-    String networks = "";
-    if (apMode) {
-      int n = WiFi.scanNetworks();
-      if (n > 0){
-    networks += "<div>Near networks:</div>"
-            "<ul>";
-        for (int _i = 0; _i < n; _i++) {
-    networks += "<li><button onclick=\"document.getElementById('ssidInput').value = '" + String(WiFi.SSID(_i)) + "'\">" + String(WiFi.SSID(_i)) + "</button></li>";
-        }
-    networks += "</ul>";
-      }
-    }
-
+    static char buff[1024];
+    // String networks = "";
+    // if (apMode) {
+    //   int n = WiFi.scanNetworks();
+    //   if (n > 0){
+    // networks += "<div>Near networks:</div>"
+    //         "<ul>";
+    //     for (int _i = 0; _i < n; _i++) {
+    // networks += "<li><button onclick=\"document.getElementById('ssidInput').value = '" + String(WiFi.SSID(_i)) + "'\">" + String(WiFi.SSID(_i)) + "</button></li>";
+    //     }
+    // networks += "</ul>";
+    //   }
+    // }
+    
     httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
     httpServer.send(200, "text/html", "");
-    httpServer.sendContent(htmlHead("Configuration"));
-    body += "<h3>WiFi</h3>"
-            "<form action='/save_wifi' method='POST'>";
-    httpServer.sendContent(body);
-    body = networks;
-    body += "<label>SSID</label>"
-            "<input type='text' name='ssid' id='ssidInput' value='" + savedSSID + "' required>"
+    sendHead("Configuration");
+  
+    sprintf(buff, "%s",  "<h3>WiFi</h3><form action='/save_wifi' method='POST'>");
+    httpServer.sendContent(buff);
+    yield();
+    // body = networks;
+    sprintf(buff, "%s%s%s", "<label>SSID</label>"
+            "<input type='text' name='ssid' id='ssidInput' value='", savedSSID.c_str(),  "' required>"
             "<label>Password</label>"
             "<input type='password' name='pass' placeholder='leave empty to keep current'>"
-            "<button class='btn btn-blue'>Save WiFi &amp; reboot</button></form>\n\n";
-    httpServer.sendContent(body);
-    body =  "<h3>GPIO Pins</h3>"
+            "<button class='btn btn-blue'>Save WiFi &amp; reboot</button></form>\n\n");
+    httpServer.sendContent(buff);
+    yield();
+    buff[0] = '\0';
+    sprintf(buff, "%s%s%d%s%d%s", buff,  "<h3>GPIO Pins</h3>"
             "<small>Do not use GPIO 6-11 (reserved for flash).</small>"
             "<form action='/save_pins' method='POST'>"
             "<div class='row'>"
-            "<div><label>SCL</label><input type='number' name='scl' value='" + String(pinSCL) + "' min='0' max='39'></div>"
-            "<div><label>SDA</label><input type='number' name='sda' value='" + String(pinSDA) + "' min='0' max='39'></div>"
-            "</div><div class='row'>";
-    httpServer.sendContent(body);
-    body =  "<div><label>RESET</label><input type='number' name='rst' value='" + String(pinRESET) + "' min='0' max='39'></div>"
-            "<div><label>SELFBOOT</label><input type='number' name='sb' value='" + String(pinSELFBOOT) + "' min='0' max='39'></div>"
+            "<div><label>SCL</label><input type='number' name='scl' value='", pinSCL, "' min='0' max='39'></div>"
+            "<div><label>SDA</label><input type='number' name='sda' value='", pinSDA, "' min='0' max='39'></div>"
+            "</div><div class='row'>");
+    httpServer.sendContent(buff);
+    buff[0] = '\0';
+    yield();
+
+    sprintf(buff, "%s%s%d%s%d%s%d%s", buff,"<div><label>RESET</label><input type='number' name='rst' value='", pinRESET, "' min='0' max='39'></div>"
+            "<div><label>SELFBOOT</label><input type='number' name='sb' value='", pinSELFBOOT, "' min='0' max='39'></div>"
             "</div>"
-            "<label>LED</label><input type='number' name='led' value='" + String(pinLED) + "' min='0' max='39'>"
-            "<button class='btn btn-blue'>Save pins &amp; reboot</button></form>\n\n";
-    httpServer.sendContent(body);
-    body =  "<h3>Factory reset</h3>"
+            "<label>LED</label><input type='number' name='led' value='", pinLED, "' min='0' max='39'>"
+            "<button class='btn btn-blue'>Save pins &amp; reboot</button></form>\n\n");
+    httpServer.sendContent(buff);
+    yield();
+    buff[0] = '\0';
+    
+    sprintf(buff, "%s", "<h3>Factory reset</h3>"
             "<form action='/factory_reset' method='POST'>"
-            "<button class='btn btn-red'>Clear all settings</button></form>";
-    body += "</body></html>";
-    httpServer.sendContent(body);
+            "<button class='btn btn-red'>Clear all settings</button></form></body></html>");
+    httpServer.sendContent(buff);
     httpServer.sendContent("");
+    yield();
+    buff[0] = '\0';
   });
 
   httpServer.on("/presets", []() {
@@ -731,18 +777,23 @@ void setupHTTP() {
       String presetName = httpServer.arg("preset");
       if (presetName.isEmpty() || !validatePresetName(presetName)) presetName = String(DEFAULT_PRESET);
       httpServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+      yield(); 
       httpServer.send(200, "text/html", "");
-      httpServer.sendContent(htmlHead("Presets"));
+      yield();
+      sendHead("Presets");
       body += "<h3>Preset edit</h3>"
-              "<h4> Current preset: " + presetName + "</h4>\n<div>\n";
+              "<h4> Current preset: " + presetName + "</h4>\n<div class='nav'>\n";
               for (String pr : ALL_PRESETS)
                 body += "<span><a href='/presets?preset="+pr+"'>"+ pr +"</a></span>\n";
-      body += "<form action='/preset_apply' method='POST'>"
+      body += "<form action='/preset_save' method='POST'>"
               "<input type='text' id='name' value='" + presetName + "' name='name' hidden='true' />\n";
       httpServer.sendContent(body);
+      yield(); 
       httpServer.sendContent(readPresetToHtml(presetName));
-      httpServer.sendContent("<button class='btn btn-blue'>Apply preset</button></form>\n\n");
+      yield(); 
+      httpServer.sendContent("<button class='btn btn-blue'>Save preset</button></form>\n\n");
       httpServer.sendContent("");
+      body.clear();
   });
 
   httpServer.on("/save_wifi", HTTP_POST, []() {
@@ -826,7 +877,7 @@ void setupHTTP() {
     messagePage("DSP Reset", "ok", "Captured program reseted...", "3000");
     resetEEPROMCapture();
   });
-  httpServer.on("/preset_apply", HTTP_POST, []() {
+  httpServer.on("/preset_save", HTTP_POST, []() {
     uint8_t presetlen, cursor = 0;
     uint16_t address, value;
     String presetName;
@@ -863,6 +914,7 @@ void setupHTTP() {
     }
     messagePage("Preset apply", "ok", "Preset applyed...", "1000");
     writePreset(presetName, preset);
+    preset.clear();
   });
   httpServer.begin();
   webUIRunning = true;
@@ -1082,6 +1134,8 @@ void copyPresetRow(uint8_t* in, uint8_t* out) {
   for (i=1; i < len+1 && i < PRESET_ROW_LENTGH; i++) out[i] = in[i];
 }
 
+
+
 presetMap getPreset(String presetName) {
   presetMap preset;
   presetItem simpledPreset[PRESET_MAX_SIZE];
@@ -1102,7 +1156,11 @@ presetMap getPreset(String presetName) {
   return preset;
 }
 
-void writePreset(String presetName, presetMap & presetData) {
+// =============================================================
+// PRESET FEATURES
+// =============================================================
+
+void writePreset(const String& presetName, presetMap & presetData) {
   presetItem simpledPreset[PRESET_MAX_SIZE];
   uint8_t _i = 0;
   const char *pn = presetName.c_str();
@@ -1121,10 +1179,17 @@ void writePreset(String presetName, presetMap & presetData) {
     prefs.putInt("size", _i);
     prefs.putBytes("data", &simpledPreset, sizeof(presetItem) * _i);
   prefs.end();
+  applyPresetI2C(presetData);
   Serial.printf("[Preset] Saving preset '%s' in memory. %d keys\n", pn, _i);
 }
 
-bool validatePresetName(String presetName) {
+void applyPresetI2C(presetMap & presetData) {
+  for (auto &element: presetData) {
+    directWrite(DSP_I2C_ADDR, element.first, &element.second[1], element.second[0]);
+  }
+}
+
+bool validatePresetName(const String& presetName) {
   for (String variant: ALL_PRESETS) if (variant == presetName) return true;
   return false;
 }
